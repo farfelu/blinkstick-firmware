@@ -20,6 +20,7 @@
 #define MODE_RGB			0
 #define MODE_RGB_INVERSE   	1
 #define MODE_WS2812		   	2
+#define MODE_SK6812RGBW		   	3
 
 #define TASK_NONE			0
 #define TASK_SEND_DATA 		1
@@ -55,7 +56,7 @@ const PROGMEM uint16_t ledDataCount[] = {MIN_LED_FRAME, MIN_LED_FRAME * 2, MIN_L
 		1: LED Data [R, G, B]
 		2: Name [Binary Data 0..32]
 		3: Data [Binary Data 0..32]
-		4: Mode set [MODE]: 0 - RGB LED Strip, 1 - Inverse RGB LED Strip, 2 - WS2812
+		4: Mode set [MODE]: 0 - RGB LED Strip, 1 - Inverse RGB LED Strip, 2 - WS2812, 3 - SK6812RGBW
 		5: LED Data [CHANNEL, INDEX, R, G, B]
 		6: LED Frame [Channel, [G, R, B][0..7]]
 		7: LED Frame [Channel, [G, R, B][0..15]]
@@ -300,6 +301,17 @@ uchar usbFunctionWrite(uchar *data, uchar len)
 			ws2812_sendarray_mask(&led[0], 3, channelToPin(0));
 			sei(); //Enable interrupts
 		}
+		else if (mode == MODE_SK6812RGBW)
+		{
+			led[0] = data[2];
+			led[1] = data[1];
+			led[2] = data[3];
+
+			//Set only the first LED on the first channel
+			cli(); //Disable interrupts
+			sk6812rgbw_sendarray_mask(&led[0], 3, channelToPin(0));
+			sei(); //Enable interrupts
+		}
 
 		return 1;
 	}
@@ -341,7 +353,7 @@ uchar usbFunctionWrite(uchar *data, uchar len)
 	}
 	else if (reportId == 5)
 	{
-		if (mode != MODE_WS2812)
+		if (mode != MODE_WS2812 && mode != MODE_SK6812RGBW)
 		{
 			return 1;
 		}
@@ -366,7 +378,7 @@ uchar usbFunctionWrite(uchar *data, uchar len)
 	}
 	else if (reportId >= 6 && reportId <= 9) // Serial data for LEDs
 	{
-		if (mode != MODE_WS2812)
+		if (mode != MODE_WS2812 && mode != MODE_SK6812RGBW)
 		{
 			return 1;
 		}
@@ -471,7 +483,7 @@ static void SetMode(void)
 {
    mode = eeprom_read_byte((uchar *)0 + 1 + 12);
 
-   if (mode > 2)
+   if (mode > 3)
 	   mode = 0;
 }
 
@@ -692,8 +704,57 @@ void ApplyMode(void)
 		ws2812_sendarray_mask(&led[0], 3, channelToPin(1));
 		ws2812_sendarray_mask(&led[0], 3, channelToPin(2));
 	}
+	else if (mode == MODE_SK6812RGBW)
+	{
+		//Turn off PWM
+		setRGBPWM(0, 0, 0);
+
+		/* Stop timer 0 and 1 */
+		TCCR1 &= ~_BV (CS10);
+		TCCR0B &=  ~_BV(CS00);
+
+		/* Disable PWM */
+		GTCCR &= ~_BV(PWM1B) & ~_BV(COM1B1);
+		TCCR0A &= ~_BV(WGM00) & ~_BV(WGM01) & ~_BV(COM0A1) & ~_BV(COM0B1);
+
+		led[0]=32; led[1]=32; led[2]=32;
+		sk6812rgbw_sendarray_mask(&led[0], 3, channelToPin(0));
+		sk6812rgbw_sendarray_mask(&led[0], 3, channelToPin(1));
+		sk6812rgbw_sendarray_mask(&led[0], 3, channelToPin(2));
+
+		_delay_ms(ws2812_resettime);
+
+		led[0]=0; led[1]=0; led[2]=0;
+		sk6812rgbw_sendarray_mask(&led[0], 3, channelToPin(0));
+		sk6812rgbw_sendarray_mask(&led[0], 3, channelToPin(1));
+		sk6812rgbw_sendarray_mask(&led[0], 3, channelToPin(2));
+	}
 }
 
+void sk6812rgbw_sendarray_mask(uint8_t *data, uint16_t datlen, uint8_t maskhi) {
+	uint16_t newLen = (datlen / 3) << 2;
+	uint8_t rgbw[newLen];
+	
+	uint16_t rgbwOffset = 0;
+	for (uint16_t i = 0; i < datlen; i = i + 3) {
+		if (data[i + 0] == data[i + 1] && data[i + 1] == data[i + 2]) {
+			rgbw[rgbwOffset + 0] = 0;
+			rgbw[rgbwOffset + 1] = 0;
+			rgbw[rgbwOffset + 2] = 0;
+			rgbw[rgbwOffset + 3] = data[i];
+		}
+		else {
+			rgbw[rgbwOffset + 0] = data[i + 0];
+			rgbw[rgbwOffset + 1] = data[i + 1];
+			rgbw[rgbwOffset + 2] = data[i + 2];
+			rgbw[rgbwOffset + 3] = 0;
+		}
+		
+		rgbwOffset = rgbwOffset + 4;
+	}
+	
+	ws2812_sendarray_mask(&rgbw[0], newLen, maskhi);
+}
 
 void ledTransfer() {
 
@@ -716,7 +777,14 @@ void ledTransfer() {
 			}
 
 			cli(); //Disable interrupts
-			ws2812_sendarray_mask(&led[ledIndex], len, channelToPin(channel));
+			if (mode == MODE_SK6812RGBW)
+			{
+				sk6812rgbw_sendarray_mask(&led[ledIndex], len, channelToPin(channel));
+			}
+			else
+			{
+				ws2812_sendarray_mask(&led[ledIndex], len, channelToPin(channel));
+			}
 			sei(); //Enable interrupts
 
 			ledIndex += len;
